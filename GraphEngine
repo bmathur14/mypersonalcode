@@ -1,0 +1,914 @@
+/*
+ * ============================================================
+ *  GRAPH ENGINE — Complex C Program
+ *  Features : Adjacency List | BFS | DFS | Dijkstra | Prim MST
+ *  Compile  : gcc -Wall -Wextra -O2 -o graph graph_engine.c
+ *  Run      : ./graph
+ * ============================================================
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <limits.h>
+#include <assert.h>
+
+/* ============================================================
+ *  CONSTANTS & UTILITIES
+ * ============================================================ */
+
+#define MAX_LABEL   32
+#define INF         INT_MAX
+
+static void separator(const char *title) {
+    printf("\n%s\n", "=============================================================");
+    printf("  %s\n", title);
+    printf("%s\n\n", "=============================================================");
+}
+
+/* ============================================================
+ *  SECTION 1 — CORE GRAPH STRUCTURES
+ * ============================================================ */
+
+/* Edge in adjacency list */
+typedef struct Edge {
+    int          to;      /* destination vertex index */
+    int          weight;
+    struct Edge *next;
+} Edge;
+
+/* Single vertex */
+typedef struct {
+    char  label[MAX_LABEL];
+    Edge *head;           /* linked list of outgoing edges */
+} Vertex;
+
+/* Graph */
+typedef struct {
+    Vertex  *vertices;
+    int      num_vertices;
+    int      num_edges;
+    bool     directed;
+    bool     weighted;
+} Graph;
+
+/* ---- Graph lifecycle ---- */
+
+Graph *graph_create(int n, bool directed, bool weighted) {
+    Graph *g = malloc(sizeof(Graph));
+    if (!g) { perror("graph_create"); exit(EXIT_FAILURE); }
+    g->vertices     = calloc(n, sizeof(Vertex));
+    if (!g->vertices) { perror("graph_create vertices"); exit(EXIT_FAILURE); }
+    g->num_vertices = n;
+    g->num_edges    = 0;
+    g->directed     = directed;
+    g->weighted     = weighted;
+    for (int i = 0; i < n; i++) {
+        snprintf(g->vertices[i].label, MAX_LABEL, "V%d", i);
+        g->vertices[i].head = NULL;
+    }
+    return g;
+}
+
+void graph_set_label(Graph *g, int v, const char *label) {
+    if (v < 0 || v >= g->num_vertices) return;
+    strncpy(g->vertices[v].label, label, MAX_LABEL - 1);
+    g->vertices[v].label[MAX_LABEL - 1] = '\0';
+}
+
+static Edge *edge_new(int to, int weight) {
+    Edge *e = malloc(sizeof(Edge));
+    if (!e) { perror("edge_new"); exit(EXIT_FAILURE); }
+    e->to     = to;
+    e->weight = weight;
+    e->next   = NULL;
+    return e;
+}
+
+void graph_add_edge(Graph *g, int from, int to, int weight) {
+    if (from < 0 || from >= g->num_vertices ||
+        to   < 0 || to   >= g->num_vertices) {
+        fprintf(stderr, "graph_add_edge: invalid vertex\n");
+        return;
+    }
+    /* Prepend to adjacency list */
+    Edge *e    = edge_new(to, weight);
+    e->next    = g->vertices[from].head;
+    g->vertices[from].head = e;
+
+    if (!g->directed) {
+        Edge *re   = edge_new(from, weight);
+        re->next   = g->vertices[to].head;
+        g->vertices[to].head = re;
+    }
+    g->num_edges++;
+}
+
+void graph_print(const Graph *g) {
+    printf("Graph [V=%d, E=%d, %s, %s]\n",
+           g->num_vertices, g->num_edges,
+           g->directed ? "directed" : "undirected",
+           g->weighted ? "weighted" : "unweighted");
+    for (int i = 0; i < g->num_vertices; i++) {
+        printf("  %-12s -> ", g->vertices[i].label);
+        Edge *e = g->vertices[i].head;
+        if (!e) printf("(none)");
+        while (e) {
+            if (g->weighted) printf("[%s w=%d] ", g->vertices[e->to].label, e->weight);
+            else             printf("[%s] ",       g->vertices[e->to].label);
+            e = e->next;
+        }
+        printf("\n");
+    }
+}
+
+void graph_free(Graph *g) {
+    for (int i = 0; i < g->num_vertices; i++) {
+        Edge *e = g->vertices[i].head;
+        while (e) { Edge *nxt = e->next; free(e); e = nxt; }
+    }
+    free(g->vertices);
+    free(g);
+}
+
+/* ============================================================
+ *  SECTION 2 — QUEUE (for BFS)
+ * ============================================================ */
+
+typedef struct {
+    int   *data;
+    int    front, rear, size, capacity;
+} Queue;
+
+Queue *queue_create(int cap) {
+    Queue *q  = malloc(sizeof(Queue));
+    q->data   = malloc(cap * sizeof(int));
+    q->front  = q->size = 0;
+    q->rear   = -1;
+    q->capacity = cap;
+    return q;
+}
+
+bool queue_empty(const Queue *q) { return q->size == 0; }
+
+void queue_push(Queue *q, int val) {
+    if (q->size == q->capacity) { fprintf(stderr, "Queue overflow\n"); return; }
+    q->rear = (q->rear + 1) % q->capacity;
+    q->data[q->rear] = val;
+    q->size++;
+}
+
+int queue_pop(Queue *q) {
+    if (queue_empty(q)) { fprintf(stderr, "Queue underflow\n"); return -1; }
+    int val = q->data[q->front];
+    q->front = (q->front + 1) % q->capacity;
+    q->size--;
+    return val;
+}
+
+void queue_free(Queue *q) { free(q->data); free(q); }
+
+/* ============================================================
+ *  SECTION 3 — MIN-HEAP / PRIORITY QUEUE (for Dijkstra & Prim)
+ * ============================================================ */
+
+typedef struct {
+    int vertex;
+    int priority;
+} HeapNode;
+
+typedef struct {
+    HeapNode *data;
+    int       size;
+    int       capacity;
+} MinHeap;
+
+MinHeap *heap_create(int cap) {
+    MinHeap *h = malloc(sizeof(MinHeap));
+    h->data    = malloc(cap * sizeof(HeapNode));
+    h->size    = 0;
+    h->capacity = cap;
+    return h;
+}
+
+bool heap_empty(const MinHeap *h) { return h->size == 0; }
+
+static void heap_swap(HeapNode *a, HeapNode *b) {
+    HeapNode tmp = *a; *a = *b; *b = tmp;
+}
+
+static void heap_sift_up(MinHeap *h, int i) {
+    while (i > 0) {
+        int parent = (i - 1) / 2;
+        if (h->data[parent].priority > h->data[i].priority) {
+            heap_swap(&h->data[parent], &h->data[i]);
+            i = parent;
+        } else break;
+    }
+}
+
+static void heap_sift_down(MinHeap *h, int i) {
+    while (true) {
+        int smallest = i;
+        int l = 2*i+1, r = 2*i+2;
+        if (l < h->size && h->data[l].priority < h->data[smallest].priority) smallest = l;
+        if (r < h->size && h->data[r].priority < h->data[smallest].priority) smallest = r;
+        if (smallest == i) break;
+        heap_swap(&h->data[i], &h->data[smallest]);
+        i = smallest;
+    }
+}
+
+void heap_push(MinHeap *h, int vertex, int priority) {
+    if (h->size == h->capacity) { fprintf(stderr, "Heap overflow\n"); return; }
+    h->data[h->size++] = (HeapNode){ vertex, priority };
+    heap_sift_up(h, h->size - 1);
+}
+
+HeapNode heap_pop(MinHeap *h) {
+    HeapNode top = h->data[0];
+    h->data[0]   = h->data[--h->size];
+    heap_sift_down(h, 0);
+    return top;
+}
+
+void heap_free(MinHeap *h) { free(h->data); free(h); }
+
+/* ============================================================
+ *  SECTION 4 — STACK (for iterative DFS)
+ * ============================================================ */
+
+typedef struct {
+    int *data;
+    int  top;
+    int  capacity;
+} Stack;
+
+Stack *stack_create(int cap) {
+    Stack *s   = malloc(sizeof(Stack));
+    s->data    = malloc(cap * sizeof(int));
+    s->top     = -1;
+    s->capacity = cap;
+    return s;
+}
+
+bool  stack_empty(const Stack *s) { return s->top < 0; }
+void  stack_push(Stack *s, int v) { if (s->top < s->capacity-1) s->data[++s->top] = v; }
+int   stack_pop(Stack *s)         { return stack_empty(s) ? -1 : s->data[s->top--]; }
+void  stack_free(Stack *s)        { free(s->data); free(s); }
+
+/* ============================================================
+ *  SECTION 5 — BFS (Breadth-First Search)
+ * ============================================================ */
+
+/*
+ * BFS from source vertex.
+ * Fills:
+ *   visited[]   — whether vertex was reached
+ *   dist[]      — hop-distance from source (unweighted)
+ *   parent[]    — predecessor in BFS tree (-1 = none)
+ */
+void bfs(const Graph *g, int src,
+         bool visited[], int dist[], int parent[]) {
+    int n = g->num_vertices;
+    for (int i = 0; i < n; i++) {
+        visited[i] = false;
+        dist[i]    = INF;
+        parent[i]  = -1;
+    }
+
+    Queue *q = queue_create(n);
+    visited[src] = true;
+    dist[src]    = 0;
+    queue_push(q, src);
+
+    while (!queue_empty(q)) {
+        int u = queue_pop(q);
+        Edge *e = g->vertices[u].head;
+        while (e) {
+            int v = e->to;
+            if (!visited[v]) {
+                visited[v] = true;
+                dist[v]    = dist[u] + 1;
+                parent[v]  = u;
+                queue_push(q, v);
+            }
+            e = e->next;
+        }
+    }
+    queue_free(q);
+}
+
+/* Print shortest (hop) path from src to dst using parent[] */
+static void print_path(const Graph *g, const int parent[], int dst) {
+    if (dst == -1) { printf("(no path)"); return; }
+    if (parent[dst] == -1) { printf("%s", g->vertices[dst].label); return; }
+    print_path(g, parent, parent[dst]);
+    printf(" -> %s", g->vertices[dst].label);
+}
+
+void bfs_report(const Graph *g, int src) {
+    int n = g->num_vertices;
+    bool *visited = calloc(n, sizeof(bool));
+    int  *dist    = malloc(n * sizeof(int));
+    int  *parent  = malloc(n * sizeof(int));
+
+    bfs(g, src, visited, dist, parent);
+
+    printf("BFS from [%s]\n", g->vertices[src].label);
+    printf("  %-12s  %6s  %s\n", "Vertex", "Hops", "Path");
+    printf("  %-12s  %6s  %s\n", "------", "----", "----");
+    for (int v = 0; v < n; v++) {
+        printf("  %-12s  %6s  ", g->vertices[v].label,
+               dist[v] == INF ? "INF" : (char[8]){0});
+        if (dist[v] != INF) printf("%d   ", dist[v]);
+        print_path(g, parent, v);
+        printf("\n");
+    }
+
+    free(visited); free(dist); free(parent);
+}
+
+/* ============================================================
+ *  SECTION 6 — DFS (Depth-First Search, iterative + recursive)
+ * ============================================================ */
+
+/* Recursive DFS — fills discovery/finish times (useful for topological sort) */
+static int dfs_timer = 0;
+
+static void dfs_recursive(const Graph *g, int u,
+                           bool visited[],
+                           int  disc[], int finish[],
+                           int  parent[]) {
+    visited[u] = true;
+    disc[u]    = ++dfs_timer;
+    Edge *e = g->vertices[u].head;
+    while (e) {
+        if (!visited[e->to]) {
+            parent[e->to] = u;
+            dfs_recursive(g, e->to, visited, disc, finish, parent);
+        }
+        e = e->next;
+    }
+    finish[u] = ++dfs_timer;
+}
+
+void dfs_full(const Graph *g, int src,
+              int disc[], int finish[], int parent[]) {
+    int n = g->num_vertices;
+    bool *visited = calloc(n, sizeof(bool));
+    for (int i = 0; i < n; i++) { disc[i] = finish[i] = parent[i] = -1; }
+    dfs_timer = 0;
+
+    /* Start from src, then continue for any unvisited (handles disconnected) */
+    dfs_recursive(g, src, visited, disc, finish, parent);
+    for (int i = 0; i < n; i++)
+        if (!visited[i])
+            dfs_recursive(g, i, visited, disc, finish, parent);
+
+    free(visited);
+}
+
+/* Iterative DFS — returns visit order */
+void dfs_iterative(const Graph *g, int src, int order[], int *count) {
+    int n = g->num_vertices;
+    bool *visited = calloc(n, sizeof(bool));
+    Stack *s = stack_create(n);
+    *count = 0;
+
+    stack_push(s, src);
+    while (!stack_empty(s)) {
+        int u = stack_pop(s);
+        if (visited[u]) continue;
+        visited[u]    = true;
+        order[(*count)++] = u;
+        /* Push neighbours in reverse so lower index visited first */
+        Edge *edges[n];
+        int   ne = 0;
+        Edge *e  = g->vertices[u].head;
+        while (e) { edges[ne++] = e; e = e->next; }
+        for (int i = ne-1; i >= 0; i--)
+            if (!visited[edges[i]->to])
+                stack_push(s, edges[i]->to);
+    }
+    stack_free(s);
+    free(visited);
+}
+
+void dfs_report(const Graph *g, int src) {
+    int n = g->num_vertices;
+    int *disc   = malloc(n * sizeof(int));
+    int *finish = malloc(n * sizeof(int));
+    int *parent = malloc(n * sizeof(int));
+
+    dfs_full(g, src, disc, finish, parent);
+
+    printf("DFS from [%s]  (recursive — with timestamps)\n", g->vertices[src].label);
+    printf("  %-12s  %5s  %6s  %s\n", "Vertex", "Disc", "Finish", "Parent");
+    printf("  %-12s  %5s  %6s  %s\n", "------", "----", "------", "------");
+    for (int v = 0; v < n; v++) {
+        printf("  %-12s  %5d  %6d  %s\n",
+               g->vertices[v].label,
+               disc[v], finish[v],
+               parent[v] == -1 ? "(root)" : g->vertices[parent[v]].label);
+    }
+
+    int *order = malloc(n * sizeof(int));
+    int  count = 0;
+    dfs_iterative(g, src, order, &count);
+    printf("\nDFS iterative visit order: ");
+    for (int i = 0; i < count; i++)
+        printf("%s%s", g->vertices[order[i]].label, i < count-1 ? " -> " : "\n");
+
+    free(disc); free(finish); free(parent); free(order);
+}
+
+/* ============================================================
+ *  SECTION 7 — DIJKSTRA (Single-Source Shortest Paths)
+ * ============================================================ */
+
+/*
+ * Dijkstra with a binary min-heap.
+ * Fills:
+ *   dist[]   — shortest distance from src to every vertex
+ *   parent[] — predecessor in shortest-path tree
+ */
+void dijkstra(const Graph *g, int src, int dist[], int parent[]) {
+    int n = g->num_vertices;
+    bool *settled = calloc(n, sizeof(bool));
+
+    for (int i = 0; i < n; i++) { dist[i] = INF; parent[i] = -1; }
+    dist[src] = 0;
+
+    MinHeap *h = heap_create(n * n);   /* generous upper bound */
+    heap_push(h, src, 0);
+
+    while (!heap_empty(h)) {
+        HeapNode node = heap_pop(h);
+        int u = node.vertex;
+        if (settled[u]) continue;
+        settled[u] = true;
+
+        Edge *e = g->vertices[u].head;
+        while (e) {
+            int v = e->to, w = e->weight;
+            if (!settled[v] && dist[u] != INF && dist[u] + w < dist[v]) {
+                dist[v]   = dist[u] + w;
+                parent[v] = u;
+                heap_push(h, v, dist[v]);
+            }
+            e = e->next;
+        }
+    }
+    heap_free(h);
+    free(settled);
+}
+
+void dijkstra_report(const Graph *g, int src) {
+    int n = g->num_vertices;
+    int *dist   = malloc(n * sizeof(int));
+    int *parent = malloc(n * sizeof(int));
+
+    dijkstra(g, src, dist, parent);
+
+    printf("Dijkstra shortest paths from [%s]\n", g->vertices[src].label);
+    printf("  %-12s  %8s  %s\n", "Vertex", "Distance", "Shortest Path");
+    printf("  %-12s  %8s  %s\n", "------", "--------", "-------------");
+    for (int v = 0; v < n; v++) {
+        printf("  %-12s  ", g->vertices[v].label);
+        if (dist[v] == INF) printf("%8s  (unreachable)\n", "INF");
+        else {
+            printf("%8d  ", dist[v]);
+            print_path(g, parent, v);
+            printf("\n");
+        }
+    }
+    free(dist); free(parent);
+}
+
+/* ============================================================
+ *  SECTION 8 — PRIM'S ALGORITHM (Minimum Spanning Tree)
+ * ============================================================ */
+
+typedef struct {
+    int from;
+    int to;
+    int weight;
+} MSTEdge;
+
+/*
+ * Prim's MST starting from vertex src.
+ * Returns array of (n-1) MST edges; caller frees.
+ * Total MST weight returned via *total_weight.
+ */
+MSTEdge *prim_mst(const Graph *g, int src, int *total_weight) {
+    int n = g->num_vertices;
+    int *key    = malloc(n * sizeof(int));    /* min edge weight to reach v */
+    int *parent = malloc(n * sizeof(int));
+    bool *in_mst = calloc(n, sizeof(bool));
+
+    for (int i = 0; i < n; i++) { key[i] = INF; parent[i] = -1; }
+    key[src] = 0;
+
+    MinHeap *h = heap_create(n * n);
+    heap_push(h, src, 0);
+
+    MSTEdge *mst = malloc((n - 1) * sizeof(MSTEdge));
+    int      mst_count = 0;
+    *total_weight = 0;
+
+    while (!heap_empty(h) && mst_count < n - 1) {
+        HeapNode node = heap_pop(h);
+        int u = node.vertex;
+        if (in_mst[u]) continue;
+        in_mst[u] = true;
+
+        if (parent[u] != -1) {
+            mst[mst_count++] = (MSTEdge){ parent[u], u, key[u] };
+            *total_weight += key[u];
+        }
+
+        Edge *e = g->vertices[u].head;
+        while (e) {
+            int v = e->to, w = e->weight;
+            if (!in_mst[v] && w < key[v]) {
+                key[v]    = w;
+                parent[v] = u;
+                heap_push(h, v, w);
+            }
+            e = e->next;
+        }
+    }
+    heap_free(h);
+    free(key); free(parent); free(in_mst);
+    return mst;
+}
+
+void mst_report(const Graph *g, int src) {
+    int total = 0;
+    MSTEdge *mst = prim_mst(g, src, &total);
+    int n = g->num_vertices;
+
+    printf("Prim's MST (starting from [%s])\n", g->vertices[src].label);
+    printf("  %-12s  %-12s  %6s\n", "From", "To", "Weight");
+    printf("  %-12s  %-12s  %6s\n", "----", "--", "------");
+    for (int i = 0; i < n - 1; i++) {
+        printf("  %-12s  %-12s  %6d\n",
+               g->vertices[mst[i].from].label,
+               g->vertices[mst[i].to].label,
+               mst[i].weight);
+    }
+    printf("  %s\n", "------------------------------");
+    printf("  Total MST weight: %d\n", total);
+    free(mst);
+}
+
+/* ============================================================
+ *  SECTION 9 — CYCLE DETECTION (directed + undirected)
+ * ============================================================ */
+
+/* Directed: DFS with WHITE/GRAY/BLACK colouring */
+typedef enum { WHITE=0, GRAY, BLACK } Color;
+
+static bool cycle_directed_dfs(const Graph *g, int u, Color color[]) {
+    color[u] = GRAY;
+    Edge *e  = g->vertices[u].head;
+    while (e) {
+        if      (color[e->to] == GRAY)  return true;   /* back edge */
+        else if (color[e->to] == WHITE)
+            if (cycle_directed_dfs(g, e->to, color)) return true;
+        e = e->next;
+    }
+    color[u] = BLACK;
+    return false;
+}
+
+bool has_cycle_directed(const Graph *g) {
+    Color *color = calloc(g->num_vertices, sizeof(Color));
+    bool   found = false;
+    for (int i = 0; i < g->num_vertices && !found; i++)
+        if (color[i] == WHITE)
+            found = cycle_directed_dfs(g, i, color);
+    free(color);
+    return found;
+}
+
+/* Undirected: Union-Find (path compression + rank) */
+typedef struct { int *parent; int *rank; } UF;
+
+static UF uf_create(int n) {
+    UF uf;
+    uf.parent = malloc(n * sizeof(int));
+    uf.rank   = calloc(n, sizeof(int));
+    for (int i = 0; i < n; i++) uf.parent[i] = i;
+    return uf;
+}
+
+static int uf_find(UF *uf, int x) {
+    if (uf->parent[x] != x)
+        uf->parent[x] = uf_find(uf, uf->parent[x]); /* path compression */
+    return uf->parent[x];
+}
+
+static bool uf_union(UF *uf, int a, int b) {
+    int ra = uf_find(uf, a), rb = uf_find(uf, b);
+    if (ra == rb) return false; /* same component → cycle */
+    if (uf->rank[ra] < uf->rank[rb]) { int t=ra; ra=rb; rb=t; }
+    uf->parent[rb] = ra;
+    if (uf->rank[ra] == uf->rank[rb]) uf->rank[ra]++;
+    return true;
+}
+
+bool has_cycle_undirected(const Graph *g) {
+    UF uf = uf_create(g->num_vertices);
+    bool found = false;
+    for (int u = 0; u < g->num_vertices && !found; u++) {
+        Edge *e = g->vertices[u].head;
+        while (e && !found) {
+            if (e->to > u)  /* process each undirected edge once */
+                if (!uf_union(&uf, u, e->to)) found = true;
+            e = e->next;
+        }
+    }
+    free(uf.parent); free(uf.rank);
+    return found;
+}
+
+/* ============================================================
+ *  SECTION 10 — TOPOLOGICAL SORT (Kahn's BFS algorithm)
+ * ============================================================ */
+
+/*
+ * Kahn's algorithm for topological ordering.
+ * Returns true if sort succeeded (no cycle).
+ * order[] receives the topological ordering.
+ */
+bool topological_sort(const Graph *g, int order[], int *count) {
+    int n = g->num_vertices;
+    int *in_degree = calloc(n, sizeof(int));
+    *count = 0;
+
+    /* Compute in-degrees */
+    for (int u = 0; u < n; u++) {
+        Edge *e = g->vertices[u].head;
+        while (e) { in_degree[e->to]++; e = e->next; }
+    }
+
+    Queue *q = queue_create(n);
+    for (int i = 0; i < n; i++)
+        if (in_degree[i] == 0) queue_push(q, i);
+
+    while (!queue_empty(q)) {
+        int u = queue_pop(q);
+        order[(*count)++] = u;
+        Edge *e = g->vertices[u].head;
+        while (e) {
+            if (--in_degree[e->to] == 0) queue_push(q, e->to);
+            e = e->next;
+        }
+    }
+    queue_free(q);
+    free(in_degree);
+    return (*count == n);   /* false → cycle detected */
+}
+
+/* ============================================================
+ *  SECTION 11 — CONNECTED COMPONENTS
+ * ============================================================ */
+
+int connected_components(const Graph *g, int comp[]) {
+    int n    = g->num_vertices;
+    int num  = 0;
+    bool *visited = calloc(n, sizeof(bool));
+    for (int i = 0; i < n; i++) comp[i] = -1;
+
+    for (int i = 0; i < n; i++) {
+        if (!visited[i]) {
+            /* BFS to label this component */
+            Queue *q = queue_create(n);
+            visited[i] = true;
+            comp[i]    = num;
+            queue_push(q, i);
+            while (!queue_empty(q)) {
+                int u = queue_pop(q);
+                Edge *e = g->vertices[u].head;
+                while (e) {
+                    if (!visited[e->to]) {
+                        visited[e->to] = true;
+                        comp[e->to]    = num;
+                        queue_push(q, e->to);
+                    }
+                    e = e->next;
+                }
+            }
+            queue_free(q);
+            num++;
+        }
+    }
+    free(visited);
+    return num;
+}
+
+/* ============================================================
+ *  SECTION 12 — SELF-TESTS
+ * ============================================================ */
+
+static void run_tests(void) {
+    separator("SELF-TESTS");
+
+    /* Test 1: BFS distances on a simple path 0-1-2-3 */
+    {
+        Graph *g = graph_create(4, false, false);
+        graph_add_edge(g, 0, 1, 1);
+        graph_add_edge(g, 1, 2, 1);
+        graph_add_edge(g, 2, 3, 1);
+        bool vis[4]; int dist[4], par[4];
+        bfs(g, 0, vis, dist, par);
+        assert(dist[0]==0 && dist[1]==1 && dist[2]==2 && dist[3]==3);
+        assert(par[0]==-1 && par[1]==0 && par[2]==1 && par[3]==2);
+        graph_free(g);
+        printf("[PASS] BFS distances\n");
+    }
+
+    /* Test 2: Dijkstra on weighted graph */
+    {
+        Graph *g = graph_create(5, false, true);
+        graph_add_edge(g, 0, 1,  4);
+        graph_add_edge(g, 0, 2,  1);
+        graph_add_edge(g, 2, 1,  2);
+        graph_add_edge(g, 1, 3,  1);
+        graph_add_edge(g, 2, 3,  5);
+        graph_add_edge(g, 3, 4,  3);
+        int dist[5], par[5];
+        dijkstra(g, 0, dist, par);
+        assert(dist[0]==0);
+        assert(dist[1]==3);   /* 0->2->1 cost 3 */
+        assert(dist[4]==7);   /* 0->2->1->3->4 cost 7 */
+        graph_free(g);
+        printf("[PASS] Dijkstra SSSP\n");
+    }
+
+    /* Test 3: Cycle detection */
+    {
+        Graph *dag = graph_create(3, true, false);
+        graph_add_edge(dag, 0, 1, 1);
+        graph_add_edge(dag, 1, 2, 1);
+        assert(!has_cycle_directed(dag));
+        graph_add_edge(dag, 2, 0, 1);   /* creates cycle */
+        assert(has_cycle_directed(dag));
+        graph_free(dag);
+        printf("[PASS] Cycle detection (directed)\n");
+    }
+
+    /* Test 4: Topological sort */
+    {
+        Graph *g = graph_create(6, true, false);
+        graph_add_edge(g, 5, 2, 1);
+        graph_add_edge(g, 5, 0, 1);
+        graph_add_edge(g, 4, 0, 1);
+        graph_add_edge(g, 4, 1, 1);
+        graph_add_edge(g, 2, 3, 1);
+        graph_add_edge(g, 3, 1, 1);
+        int order[6]; int cnt;
+        assert(topological_sort(g, order, &cnt) && cnt == 6);
+        /* Verify: for each edge u->v, u appears before v */
+        int pos[6];
+        for (int i = 0; i < 6; i++) pos[order[i]] = i;
+        for (int u = 0; u < 6; u++) {
+            Edge *e = g->vertices[u].head;
+            while (e) { assert(pos[u] < pos[e->to]); e = e->next; }
+        }
+        graph_free(g);
+        printf("[PASS] Topological sort\n");
+    }
+
+    /* Test 5: Connected components */
+    {
+        Graph *g = graph_create(6, false, false);
+        graph_add_edge(g, 0, 1, 1);
+        graph_add_edge(g, 1, 2, 1);
+        /* 3, 4, 5 form a separate component */
+        graph_add_edge(g, 3, 4, 1);
+        int comp[6];
+        int nc = connected_components(g, comp);
+        assert(nc == 3);  /* {0,1,2}, {3,4}, {5} */
+        assert(comp[0]==comp[1] && comp[1]==comp[2]);
+        assert(comp[3]==comp[4]);
+        assert(comp[0] != comp[3]);
+        assert(comp[5] != comp[0] && comp[5] != comp[3]);
+        graph_free(g);
+        printf("[PASS] Connected components\n");
+    }
+
+    printf("\nAll tests passed.\n");
+}
+
+/* ============================================================
+ *  SECTION 13 — MAIN DEMO
+ *
+ *  We model a weighted graph of 8 Indian cities with road
+ *  distances (in km) — a fun & realistic graph to traverse.
+ * ============================================================ */
+
+int main(void) {
+    /*
+     *  City graph (undirected, weighted):
+     *
+     *  Mumbai(0) -- Delhi(1) -- Jaipur(2)
+     *    |    \        |
+     *  Pune(3) \   Agra(4)
+     *    |      \
+     *  Hyderabad(5) -- Chennai(6) -- Bengaluru(7)
+     *                      |
+     *                  Coimbatore(8)
+     */
+
+    separator("GRAPH ENGINE — Indian Cities Road Network");
+
+    Graph *g = graph_create(9, false, true);
+    const char *cities[] = {
+        "Mumbai","Delhi","Jaipur","Pune","Hyderabad",
+        "Chennai","Bengaluru","Agra","Coimbatore"
+    };
+    for (int i = 0; i < 9; i++) graph_set_label(g, i, cities[i]);
+
+    /* Approximate road distances in km */
+    graph_add_edge(g, 0, 1, 1400);  /* Mumbai  - Delhi      */
+    graph_add_edge(g, 0, 3,  150);  /* Mumbai  - Pune       */
+    graph_add_edge(g, 0, 4,  700);  /* Mumbai  - Hyderabad  */
+    graph_add_edge(g, 1, 2,  280);  /* Delhi   - Jaipur     */
+    graph_add_edge(g, 1, 7,  200);  /* Delhi   - Agra       */
+    graph_add_edge(g, 2, 7,  240);  /* Jaipur  - Agra       */
+    graph_add_edge(g, 3, 4,  560);  /* Pune    - Hyderabad  */
+    graph_add_edge(g, 4, 5,  620);  /* Hyderabad - Chennai  */
+    graph_add_edge(g, 5, 6,  340);  /* Chennai - Bengaluru  */
+    graph_add_edge(g, 5, 8,  490);  /* Chennai - Coimbatore */
+    graph_add_edge(g, 6, 8,  360);  /* Bengaluru-Coimbatore */
+
+    graph_print(g);
+
+    /* ---- BFS ---- */
+    separator("BFS — from Mumbai");
+    bfs_report(g, 0);
+
+    /* ---- DFS ---- */
+    separator("DFS — from Mumbai");
+    dfs_report(g, 0);
+
+    /* ---- Dijkstra ---- */
+    separator("DIJKSTRA — Shortest Road Distances from Mumbai");
+    dijkstra_report(g, 0);
+
+    /* ---- MST ---- */
+    separator("PRIM'S MST — Minimum Spanning Road Network");
+    mst_report(g, 0);
+
+    /* ---- Cycle Detection ---- */
+    separator("CYCLE DETECTION");
+    printf("Undirected graph has cycle: %s\n",
+           has_cycle_undirected(g) ? "YES" : "NO");
+
+    /* ---- Connected Components ---- */
+    separator("CONNECTED COMPONENTS");
+    int comp[9];
+    int nc = connected_components(g, comp);
+    printf("Number of connected components: %d\n\n", nc);
+    for (int i = 0; i < 9; i++)
+        printf("  %-12s -> component %d\n", cities[i], comp[i]);
+
+    /* ---- Topological Sort (on a separate DAG: course prerequisites) ---- */
+    separator("TOPOLOGICAL SORT — Course Prerequisites (DAG)");
+    Graph *dag = graph_create(7, true, false);
+    const char *courses[] = {
+        "Maths","Physics","Algorithms","OS","Compilers","Networks","AI"
+    };
+    for (int i = 0; i < 7; i++) graph_set_label(dag, i, courses[i]);
+    graph_add_edge(dag, 0, 2, 1);  /* Maths -> Algorithms  */
+    graph_add_edge(dag, 0, 5, 1);  /* Maths -> Networks    */
+    graph_add_edge(dag, 1, 3, 1);  /* Physics -> OS        */
+    graph_add_edge(dag, 2, 4, 1);  /* Algorithms -> Compilers */
+    graph_add_edge(dag, 2, 6, 1);  /* Algorithms -> AI     */
+    graph_add_edge(dag, 3, 4, 1);  /* OS -> Compilers      */
+    graph_add_edge(dag, 5, 6, 1);  /* Networks -> AI       */
+
+    graph_print(dag);
+
+    int order[7]; int cnt;
+    if (topological_sort(dag, order, &cnt)) {
+        printf("Valid course order: ");
+        for (int i = 0; i < cnt; i++)
+            printf("%s%s", courses[order[i]], i < cnt-1 ? " -> " : "\n");
+    } else {
+        printf("Cycle detected — cannot topologically sort!\n");
+    }
+    printf("DAG has cycle: %s\n", has_cycle_directed(dag) ? "YES" : "NO");
+    graph_free(dag);
+
+    graph_free(g);
+
+    /* ---- Self-Tests ---- */
+    run_tests();
+
+    return EXIT_SUCCESS;
+}
