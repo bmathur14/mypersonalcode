@@ -1,0 +1,534 @@
+/*
+ * ============================================================
+ *  COMPLEX C PROGRAM — Data Structures Suite
+ *  Implements: Doubly Linked List | Binary Search Tree | Hash Map
+ *  Author  : Claude (Anthropic)
+ *  Compile : gcc -Wall -Wextra -O2 -o ds data_structures.c
+ * ============================================================
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <assert.h>
+
+/* ============================================================
+ *  SECTION 1 — DOUBLY LINKED LIST
+ * ============================================================ */
+
+typedef struct DLLNode {
+    int              data;
+    struct DLLNode  *prev;
+    struct DLLNode  *next;
+} DLLNode;
+
+typedef struct {
+    DLLNode *head;
+    DLLNode *tail;
+    size_t   size;
+} DoublyLinkedList;
+
+/* --- DLL helpers --- */
+
+static DLLNode *dll_new_node(int data) {
+    DLLNode *n = malloc(sizeof(DLLNode));
+    if (!n) { fprintf(stderr, "DLL: out of memory\n"); exit(EXIT_FAILURE); }
+    n->data = data;
+    n->prev = n->next = NULL;
+    return n;
+}
+
+void dll_init(DoublyLinkedList *list) {
+    list->head = list->tail = NULL;
+    list->size = 0;
+}
+
+void dll_push_front(DoublyLinkedList *list, int data) {
+    DLLNode *n = dll_new_node(data);
+    if (!list->head) {
+        list->head = list->tail = n;
+    } else {
+        n->next        = list->head;
+        list->head->prev = n;
+        list->head     = n;
+    }
+    list->size++;
+}
+
+void dll_push_back(DoublyLinkedList *list, int data) {
+    DLLNode *n = dll_new_node(data);
+    if (!list->tail) {
+        list->head = list->tail = n;
+    } else {
+        n->prev        = list->tail;
+        list->tail->next = n;
+        list->tail     = n;
+    }
+    list->size++;
+}
+
+bool dll_remove(DoublyLinkedList *list, int data) {
+    DLLNode *cur = list->head;
+    while (cur) {
+        if (cur->data == data) {
+            if (cur->prev) cur->prev->next = cur->next; else list->head = cur->next;
+            if (cur->next) cur->next->prev = cur->prev; else list->tail = cur->prev;
+            free(cur);
+            list->size--;
+            return true;
+        }
+        cur = cur->next;
+    }
+    return false;
+}
+
+/* Reverse the list in-place in O(n) */
+void dll_reverse(DoublyLinkedList *list) {
+    DLLNode *cur = list->head;
+    DLLNode *tmp = NULL;
+    while (cur) {
+        tmp       = cur->prev;
+        cur->prev = cur->next;
+        cur->next = tmp;
+        cur       = cur->prev;        /* move forward (was next) */
+    }
+    if (tmp) list->head = tmp->prev;  /* tmp is the last swapped node */
+    /* Swap head and tail */
+    tmp        = list->head;
+    list->head = list->tail;
+    list->tail = tmp;
+}
+
+void dll_print(const DoublyLinkedList *list) {
+    printf("DLL [size=%zu]: NULL <-> ", list->size);
+    DLLNode *cur = list->head;
+    while (cur) {
+        printf("%d <-> ", cur->data);
+        cur = cur->next;
+    }
+    printf("NULL\n");
+}
+
+void dll_free(DoublyLinkedList *list) {
+    DLLNode *cur = list->head;
+    while (cur) {
+        DLLNode *nxt = cur->next;
+        free(cur);
+        cur = nxt;
+    }
+    list->head = list->tail = NULL;
+    list->size = 0;
+}
+
+/* ============================================================
+ *  SECTION 2 — BINARY SEARCH TREE (BST) with AVL balancing
+ * ============================================================ */
+
+typedef struct BSTNode {
+    int          key;
+    int          height;
+    struct BSTNode *left;
+    struct BSTNode *right;
+} BSTNode;
+
+static int bst_height(BSTNode *n) { return n ? n->height : 0; }
+static int bst_max(int a, int b)  { return a > b ? a : b; }
+
+static BSTNode *bst_new_node(int key) {
+    BSTNode *n = malloc(sizeof(BSTNode));
+    if (!n) { fprintf(stderr, "BST: out of memory\n"); exit(EXIT_FAILURE); }
+    n->key    = key;
+    n->height = 1;
+    n->left = n->right = NULL;
+    return n;
+}
+
+static void bst_update_height(BSTNode *n) {
+    if (n) n->height = 1 + bst_max(bst_height(n->left), bst_height(n->right));
+}
+
+static int bst_balance_factor(BSTNode *n) {
+    return n ? bst_height(n->left) - bst_height(n->right) : 0;
+}
+
+/* Rotations */
+static BSTNode *bst_rotate_right(BSTNode *y) {
+    BSTNode *x  = y->left;
+    BSTNode *t2 = x->right;
+    x->right = y;
+    y->left  = t2;
+    bst_update_height(y);
+    bst_update_height(x);
+    return x;
+}
+
+static BSTNode *bst_rotate_left(BSTNode *x) {
+    BSTNode *y  = x->right;
+    BSTNode *t2 = y->left;
+    y->left  = x;
+    x->right = t2;
+    bst_update_height(x);
+    bst_update_height(y);
+    return y;
+}
+
+static BSTNode *bst_balance(BSTNode *n) {
+    bst_update_height(n);
+    int bf = bst_balance_factor(n);
+
+    if (bf > 1) {
+        if (bst_balance_factor(n->left) < 0)
+            n->left = bst_rotate_left(n->left);   /* LR case */
+        return bst_rotate_right(n);
+    }
+    if (bf < -1) {
+        if (bst_balance_factor(n->right) > 0)
+            n->right = bst_rotate_right(n->right); /* RL case */
+        return bst_rotate_left(n);
+    }
+    return n;
+}
+
+BSTNode *bst_insert(BSTNode *root, int key) {
+    if (!root) return bst_new_node(key);
+    if (key < root->key)      root->left  = bst_insert(root->left,  key);
+    else if (key > root->key) root->right = bst_insert(root->right, key);
+    else                      return root;   /* duplicates ignored */
+    return bst_balance(root);
+}
+
+bool bst_search(BSTNode *root, int key) {
+    if (!root)            return false;
+    if (key == root->key) return true;
+    return key < root->key ? bst_search(root->left, key)
+                           : bst_search(root->right, key);
+}
+
+static BSTNode *bst_min_node(BSTNode *n) {
+    while (n->left) n = n->left;
+    return n;
+}
+
+BSTNode *bst_delete(BSTNode *root, int key) {
+    if (!root) return NULL;
+    if      (key < root->key) root->left  = bst_delete(root->left,  key);
+    else if (key > root->key) root->right = bst_delete(root->right, key);
+    else {
+        if (!root->left || !root->right) {
+            BSTNode *tmp = root->left ? root->left : root->right;
+            free(root);
+            return tmp;
+        }
+        BSTNode *succ = bst_min_node(root->right);
+        root->key  = succ->key;
+        root->right = bst_delete(root->right, succ->key);
+    }
+    return bst_balance(root);
+}
+
+/* In-order, Pre-order, Post-order traversals */
+void bst_inorder(BSTNode *root) {
+    if (!root) return;
+    bst_inorder(root->left);
+    printf("%d ", root->key);
+    bst_inorder(root->right);
+}
+
+void bst_preorder(BSTNode *root) {
+    if (!root) return;
+    printf("%d ", root->key);
+    bst_preorder(root->left);
+    bst_preorder(root->right);
+}
+
+void bst_postorder(BSTNode *root) {
+    if (!root) return;
+    bst_postorder(root->left);
+    bst_postorder(root->right);
+    printf("%d ", root->key);
+}
+
+void bst_free(BSTNode *root) {
+    if (!root) return;
+    bst_free(root->left);
+    bst_free(root->right);
+    free(root);
+}
+
+/* Pretty-print tree sideways */
+void bst_print_tree(BSTNode *root, int space) {
+    if (!root) return;
+    space += 5;
+    bst_print_tree(root->right, space);
+    printf("\n");
+    for (int i = 5; i < space; i++) printf(" ");
+    printf("%d (h=%d)\n", root->key, root->height);
+    bst_print_tree(root->left, space);
+}
+
+/* ============================================================
+ *  SECTION 3 — HASH MAP (separate chaining, dynamic resize)
+ * ============================================================ */
+
+#define HM_INITIAL_CAP   8
+#define HM_LOAD_FACTOR   0.75
+
+typedef struct HMEntry {
+    char         *key;
+    int           value;
+    struct HMEntry *next;
+} HMEntry;
+
+typedef struct {
+    HMEntry **buckets;
+    size_t    capacity;
+    size_t    size;
+} HashMap;
+
+/* djb2 hash */
+static unsigned long hm_hash(const char *key, size_t cap) {
+    unsigned long h = 5381;
+    int c;
+    while ((c = (unsigned char)*key++)) h = ((h << 5) + h) + c;
+    return h % cap;
+}
+
+void hm_init(HashMap *map) {
+    map->capacity = HM_INITIAL_CAP;
+    map->size     = 0;
+    map->buckets  = calloc(map->capacity, sizeof(HMEntry *));
+    if (!map->buckets) { fprintf(stderr, "HM: out of memory\n"); exit(EXIT_FAILURE); }
+}
+
+static void hm_resize(HashMap *map) {
+    size_t    new_cap     = map->capacity * 2;
+    HMEntry **new_buckets = calloc(new_cap, sizeof(HMEntry *));
+    if (!new_buckets) { fprintf(stderr, "HM: resize failed\n"); return; }
+
+    for (size_t i = 0; i < map->capacity; i++) {
+        HMEntry *entry = map->buckets[i];
+        while (entry) {
+            HMEntry *next = entry->next;
+            unsigned long idx = hm_hash(entry->key, new_cap);
+            entry->next       = new_buckets[idx];
+            new_buckets[idx]  = entry;
+            entry = next;
+        }
+    }
+    free(map->buckets);
+    map->buckets  = new_buckets;
+    map->capacity = new_cap;
+}
+
+void hm_put(HashMap *map, const char *key, int value) {
+    if ((double)map->size / map->capacity >= HM_LOAD_FACTOR)
+        hm_resize(map);
+
+    unsigned long idx   = hm_hash(key, map->capacity);
+    HMEntry      *entry = map->buckets[idx];
+
+    while (entry) {
+        if (strcmp(entry->key, key) == 0) { entry->value = value; return; }
+        entry = entry->next;
+    }
+
+    HMEntry *new_entry = malloc(sizeof(HMEntry));
+    if (!new_entry) { fprintf(stderr, "HM: out of memory\n"); exit(EXIT_FAILURE); }
+    new_entry->key   = strdup(key);
+    new_entry->value = value;
+    new_entry->next  = map->buckets[idx];
+    map->buckets[idx] = new_entry;
+    map->size++;
+}
+
+bool hm_get(const HashMap *map, const char *key, int *out_value) {
+    unsigned long idx   = hm_hash(key, map->capacity);
+    HMEntry      *entry = map->buckets[idx];
+    while (entry) {
+        if (strcmp(entry->key, key) == 0) { *out_value = entry->value; return true; }
+        entry = entry->next;
+    }
+    return false;
+}
+
+bool hm_remove(HashMap *map, const char *key) {
+    unsigned long  idx   = hm_hash(key, map->capacity);
+    HMEntry       *entry = map->buckets[idx];
+    HMEntry       *prev  = NULL;
+
+    while (entry) {
+        if (strcmp(entry->key, key) == 0) {
+            if (prev) prev->next        = entry->next;
+            else      map->buckets[idx] = entry->next;
+            free(entry->key);
+            free(entry);
+            map->size--;
+            return true;
+        }
+        prev  = entry;
+        entry = entry->next;
+    }
+    return false;
+}
+
+void hm_print(const HashMap *map) {
+    printf("HashMap [size=%zu, capacity=%zu, load=%.2f]\n",
+           map->size, map->capacity, (double)map->size / map->capacity);
+    for (size_t i = 0; i < map->capacity; i++) {
+        HMEntry *entry = map->buckets[i];
+        if (!entry) continue;
+        printf("  [%2zu] ", i);
+        while (entry) {
+            printf("(\"%s\" -> %d) ", entry->key, entry->value);
+            entry = entry->next;
+        }
+        printf("\n");
+    }
+}
+
+void hm_free(HashMap *map) {
+    for (size_t i = 0; i < map->capacity; i++) {
+        HMEntry *entry = map->buckets[i];
+        while (entry) {
+            HMEntry *next = entry->next;
+            free(entry->key);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(map->buckets);
+    map->buckets  = NULL;
+    map->size = map->capacity = 0;
+}
+
+/* ============================================================
+ *  SECTION 4 — DEMO / MAIN
+ * ============================================================ */
+
+static void separator(const char *title) {
+    printf("\n%s\n", "=============================================================");
+    printf("  %s\n", title);
+    printf("%s\n\n", "=============================================================");
+}
+
+int main(void) {
+
+    /* ---- Doubly Linked List Demo ---- */
+    separator("DOUBLY LINKED LIST");
+
+    DoublyLinkedList dll;
+    dll_init(&dll);
+
+    int dll_data[] = {10, 20, 30, 40, 50};
+    for (int i = 0; i < 5; i++) dll_push_back(&dll, dll_data[i]);
+    dll_push_front(&dll, 5);
+    dll_print(&dll);
+
+    printf("Remove 30: %s\n", dll_remove(&dll, 30) ? "OK" : "Not found");
+    dll_print(&dll);
+
+    printf("Reversing...\n");
+    dll_reverse(&dll);
+    dll_print(&dll);
+
+    dll_free(&dll);
+
+    /* ---- AVL-BST Demo ---- */
+    separator("BINARY SEARCH TREE (AVL Self-Balancing)");
+
+    BSTNode *root = NULL;
+    int bst_keys[] = {50, 30, 70, 20, 40, 60, 80, 10, 25};
+    for (int i = 0; i < 9; i++) root = bst_insert(root, bst_keys[i]);
+
+    printf("Tree structure (rotated 90 deg, right -> top):\n");
+    bst_print_tree(root, 0);
+
+    printf("\nIn-order   : "); bst_inorder(root);   printf("\n");
+    printf("Pre-order  : "); bst_preorder(root);   printf("\n");
+    printf("Post-order : "); bst_postorder(root);  printf("\n");
+
+    printf("\nSearch 40  : %s\n", bst_search(root, 40) ? "FOUND" : "NOT FOUND");
+    printf("Search 99  : %s\n", bst_search(root, 99) ? "FOUND" : "NOT FOUND");
+
+    printf("\nDelete 30 (node with two children)...\n");
+    root = bst_delete(root, 30);
+    printf("In-order after deletion: "); bst_inorder(root); printf("\n");
+    bst_print_tree(root, 0);
+
+    bst_free(root);
+
+    /* ---- Hash Map Demo ---- */
+    separator("HASH MAP (separate chaining + dynamic resize)");
+
+    HashMap hm;
+    hm_init(&hm);
+
+    /* Insert stock → price mappings (Indian market theme!) */
+    const char *stocks[] = { "RELIANCE", "TCS", "HDFC", "INFY", "ICICIBANK",
+                              "WIPRO", "BAJFINANCE", "HCLTECH", "LT", "SBIN" };
+    int prices[]         = { 2950, 4100, 1680, 1780, 1200,
+                               530, 7200, 1680, 3700,  850 };
+
+    for (int i = 0; i < 10; i++) hm_put(&hm, stocks[i], prices[i]);
+
+    printf("After inserting 10 stocks:\n");
+    hm_print(&hm);
+
+    int val;
+    printf("\nLookup TCS      : ");
+    hm_get(&hm, "TCS", &val) ? printf("₹%d\n", val) : printf("Not found\n");
+
+    printf("Lookup TATASTEEL: ");
+    hm_get(&hm, "TATASTEEL", &val) ? printf("₹%d\n", val) : printf("Not found\n");
+
+    printf("\nUpdate RELIANCE price to ₹3100\n");
+    hm_put(&hm, "RELIANCE", 3100);
+    hm_get(&hm, "RELIANCE", &val);
+    printf("RELIANCE now    : ₹%d\n", val);
+
+    printf("\nRemove WIPRO    : %s\n", hm_remove(&hm, "WIPRO") ? "OK" : "Not found");
+    printf("After removal:\n");
+    hm_print(&hm);
+
+    hm_free(&hm);
+
+    /* ---- Assertions (self-test) ---- */
+    separator("SELF-TESTS");
+    {
+        DoublyLinkedList t; dll_init(&t);
+        dll_push_back(&t, 1); dll_push_back(&t, 2); dll_push_back(&t, 3);
+        assert(t.size == 3);
+        assert(dll_remove(&t, 2));
+        assert(t.size == 2);
+        assert(!dll_remove(&t, 99));
+        dll_free(&t);
+        printf("[PASS] DLL tests\n");
+    }
+    {
+        BSTNode *r = NULL;
+        for (int v : (int[]){5, 3, 7, 1, 4}) r = bst_insert(r, v);
+        assert(bst_search(r, 3));
+        assert(!bst_search(r, 99));
+        r = bst_delete(r, 3);
+        assert(!bst_search(r, 3));
+        bst_free(r);
+        printf("[PASS] BST tests\n");
+    }
+    {
+        HashMap m; hm_init(&m);
+        hm_put(&m, "nifty", 24500);
+        hm_put(&m, "sensex", 80000);
+        int v;
+        assert(hm_get(&m, "nifty", &v) && v == 24500);
+        hm_put(&m, "nifty", 25000);
+        assert(hm_get(&m, "nifty", &v) && v == 25000);
+        assert(hm_remove(&m, "sensex"));
+        assert(!hm_get(&m, "sensex", &v));
+        hm_free(&m);
+        printf("[PASS] HashMap tests\n");
+    }
+
+    printf("\nAll tests passed.\n");
+    return EXIT_SUCCESS;
+}
